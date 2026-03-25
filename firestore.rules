@@ -116,17 +116,17 @@ service cloud.firestore {
     }
 
     match /trackedItems/{itemId} {
-      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow read: if isDocOwner();
       allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidTrackedItem(request.resource.data);
-      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid && isValidTrackedItem(request.resource.data);
-      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow update: if isDocOwner() && request.resource.data.userId == request.auth.uid && isValidTrackedItem(request.resource.data);
+      allow delete: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
     }
 
     match /saleResults/{resultId} {
-      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow read: if isDocOwner();
       allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidSaleResult(request.resource.data);
-      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid && isValidSaleResult(request.resource.data);
-      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow update: if isDocOwner() && request.resource.data.userId == request.auth.uid && isValidSaleResult(request.resource.data);
+      allow delete: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid);
     }
   }
 }

@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -11,17 +11,49 @@ export interface SaleInfo {
   description?: string;
 }
 
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2, initialDelay = 800): Promise<T> {
+  let lastError: any;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      
+      // Handle different error structures (SDK error vs raw response)
+      const errorCode = error?.code || error?.error?.code || error?.status;
+      const errorMessage = error?.message || error?.error?.message || "";
+      const errorStatus = error?.status || error?.error?.status;
+
+      const is503 = errorCode === 503 || 
+                    errorCode === "503" ||
+                    errorStatus === "UNAVAILABLE" ||
+                    errorMessage.includes('503') ||
+                    errorMessage.includes('high demand');
+      
+      if (is503 && i < maxRetries - 1) {
+        const delay = initialDelay * Math.pow(2, i);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
 export async function searchSales(itemName: string, location: string): Promise<SaleInfo[]> {
-  const prompt = `Find the best current sales, promotions, and prices for "${itemName}" in or near "${location}". 
-  Include the store name, current price, original price (if available), discount percentage or amount (if available), a direct URL to the product or store page, and a brief description of the deal.
-  Focus on major retailers and local stores that have online presence or clear promotional data.`;
+  const prompt = `Find up to 8 of the best current sales for "${itemName}" in or near "${location}". 
+  Sort by "best deal" first. 
+  For each deal, find the regular price and sale price. 
+  Include store name, current price, original price, discount, URL, and a brief description.`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await withRetry(() => ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.ARRAY,
@@ -39,7 +71,7 @@ export async function searchSales(itemName: string, location: string): Promise<S
           },
         },
       },
-    });
+    }));
 
     const text = response.text;
     if (!text) return [];

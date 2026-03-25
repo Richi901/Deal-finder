@@ -58,6 +58,7 @@ export default function App() {
   const [newItemName, setNewItemName] = useState('');
   const [location, setLocation] = useState<string>('');
   const [searching, setSearching] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Auth listener
@@ -102,7 +103,12 @@ export default function App() {
   // Fetch items
   useEffect(() => {
     if (!user) {
-      setItems([]);
+      const localItems = localStorage.getItem('guest_items');
+      if (localItems) {
+        setItems(JSON.parse(localItems));
+      } else {
+        setItems([]);
+      }
       return;
     }
 
@@ -124,7 +130,17 @@ export default function App() {
 
   // Fetch results for all items
   useEffect(() => {
-    if (!user || items.length === 0) {
+    if (!user) {
+      const localResults = localStorage.getItem('guest_results');
+      if (localResults) {
+        setResults(JSON.parse(localResults));
+      } else {
+        setResults({});
+      }
+      return;
+    }
+
+    if (items.length === 0) {
       setResults({});
       return;
     }
@@ -153,6 +169,71 @@ export default function App() {
 
     return () => unsubscribe();
   }, [user, items]);
+
+  // Save to localStorage for guests
+  useEffect(() => {
+    if (!user) {
+      localStorage.setItem('guest_items', JSON.stringify(items));
+      localStorage.setItem('guest_results', JSON.stringify(results));
+    }
+  }, [items, results, user]);
+
+  // Sync guest data to Firestore on login
+  useEffect(() => {
+    if (user) {
+      const syncData = async () => {
+        const localItems = localStorage.getItem('guest_items');
+        const localResults = localStorage.getItem('guest_results');
+        
+        if (localItems) {
+          try {
+            const itemsToSync = JSON.parse(localItems) as TrackedItem[];
+            if (itemsToSync.length > 0) {
+              toast.info("Syncing your guest data to your account...");
+              
+              const resultsToSync = localResults ? JSON.parse(localResults) as Record<string, SaleResult[]> : {};
+              
+              for (const item of itemsToSync) {
+                // Check if item already exists (simple name check)
+                const exists = items.some(i => i.name.toLowerCase() === item.name.toLowerCase());
+                if (!exists) {
+                  const { id: oldId, ...itemData } = item;
+                  const docRef = await addDoc(collection(db, 'trackedItems'), {
+                    ...itemData,
+                    userId: user.uid,
+                    createdAt: new Date().toISOString()
+                  });
+                  
+                  // Sync results for this item
+                  const itemResults = resultsToSync[oldId];
+                  if (itemResults) {
+                    for (const result of itemResults) {
+                      const { id: rid, ...resultData } = result;
+                      await addDoc(collection(db, 'saleResults'), {
+                        ...resultData,
+                        trackedItemId: docRef.id,
+                        userId: user.uid,
+                        foundAt: new Date().toISOString()
+                      });
+                    }
+                  }
+                }
+              }
+              
+              // Clear local storage after sync
+              localStorage.removeItem('guest_items');
+              localStorage.removeItem('guest_results');
+              toast.success("Data synced successfully!");
+            }
+          } catch (e) {
+            console.error("Failed to sync guest data", e);
+          }
+        }
+      };
+      
+      syncData();
+    }
+  }, [user]);
 
   const [loggingIn, setLoggingIn] = useState(false);
 
@@ -188,14 +269,28 @@ export default function App() {
 
   const addItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!user || !newItemName.trim()) return;
+    if (!newItemName.trim()) return;
 
     try {
-      await addDoc(collection(db, 'trackedItems'), {
-        userId: user.uid,
+      const itemData = {
         name: newItemName.trim(),
         createdAt: new Date().toISOString()
-      });
+      };
+
+      if (user) {
+        await addDoc(collection(db, 'trackedItems'), {
+          ...itemData,
+          userId: user.uid,
+        });
+      } else {
+        const newItem: TrackedItem = {
+          id: crypto.randomUUID(),
+          ...itemData,
+          userId: 'guest'
+        };
+        setItems(prev => [newItem, ...prev]);
+      }
+      
       setNewItemName('');
       toast.success(`Started tracking ${newItemName}`);
     } catch (error) {
@@ -206,24 +301,41 @@ export default function App() {
   const [itemToDelete, setItemToDelete] = useState<{id: string, name: string} | null>(null);
 
   const deleteItem = async () => {
-    if (!itemToDelete) return;
+    if (!itemToDelete || deleting) return;
     const { id, name } = itemToDelete;
+    setDeleting(id);
     try {
-      await deleteDoc(doc(db, 'trackedItems', id));
-      // Also delete associated results
-      const itemResults = results[id] || [];
-      for (const result of itemResults) {
-        await deleteDoc(doc(db, 'saleResults', result.id));
+      if (user) {
+        await deleteDoc(doc(db, 'trackedItems', id));
+        // Also delete associated results
+        const itemResults = results[id] || [];
+        for (const result of itemResults) {
+          try {
+            await deleteDoc(doc(db, 'saleResults', result.id));
+          } catch (e) {
+            // Ignore individual result deletion errors (might be already deleted)
+            console.warn(`Failed to delete result ${result.id}`, e);
+          }
+        }
+      } else {
+        setItems(prev => prev.filter(item => item.id !== id));
+        setResults(prev => {
+          const newResults = { ...prev };
+          delete newResults[id];
+          return newResults;
+        });
       }
       toast.success(`Stopped tracking ${name}`);
       setItemToDelete(null);
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, 'trackedItems');
+    } finally {
+      setDeleting(null);
     }
   };
 
   const findSales = async (item: TrackedItem) => {
-    if (!user || !location) {
+    if (!location) {
       toast.error("Please provide your location first.");
       return;
     }
@@ -237,17 +349,41 @@ export default function App() {
       if (sales.length === 0) {
         toast.info(`No new sales found for ${item.name} right now.`);
       } else {
-        // Clear old results for this item first (optional, or keep history)
-        const oldResults = results[item.id] || [];
-        for (const old of oldResults) {
-          await deleteDoc(doc(db, 'saleResults', old.id));
-        }
+        if (user) {
+          // Clear old results for this item first in parallel
+          const oldResults = results[item.id] || [];
+          const deletePromises = oldResults.map(old => 
+            deleteDoc(doc(db, 'saleResults', old.id)).catch(e => {
+              console.warn(`Failed to delete old result ${old.id}`, e);
+            })
+          );
+          await Promise.all(deletePromises);
 
-        // Save new results
-        for (const sale of sales) {
-          await addDoc(collection(db, 'saleResults'), {
+          // Save new results in parallel
+          const addPromises = sales.map(sale => 
+            addDoc(collection(db, 'saleResults'), {
+              trackedItemId: item.id,
+              userId: user.uid,
+              storeName: sale.storeName,
+              price: sale.price,
+              originalPrice: sale.originalPrice || null,
+              discount: sale.discount || null,
+              url: sale.url,
+              description: sale.description || null,
+              foundAt: new Date().toISOString()
+            })
+          );
+          await Promise.all(addPromises);
+          
+          // Update item's last search time
+          await updateDoc(doc(db, 'trackedItems', item.id), {
+            lastSearchAt: new Date().toISOString()
+          });
+        } else {
+          const newResults: SaleResult[] = sales.map(sale => ({
+            id: crypto.randomUUID(),
             trackedItemId: item.id,
-            userId: user.uid,
+            userId: 'guest',
             storeName: sale.storeName,
             price: sale.price,
             originalPrice: sale.originalPrice || null,
@@ -255,13 +391,15 @@ export default function App() {
             url: sale.url,
             description: sale.description || null,
             foundAt: new Date().toISOString()
-          });
+          }));
+
+          setResults(prev => ({
+            ...prev,
+            [item.id]: newResults
+          }));
+
+          setItems(prev => prev.map(i => i.id === item.id ? { ...i, lastSearchAt: new Date().toISOString() } : i));
         }
-        
-        // Update item's last search time
-        await updateDoc(doc(db, 'trackedItems', item.id), {
-          lastSearchAt: new Date().toISOString()
-        });
 
         toast.success(`Found ${sales.length} sales for ${item.name}!`);
       }
@@ -273,37 +411,32 @@ export default function App() {
     }
   };
 
+  const getBestDealId = (itemResults: SaleResult[]) => {
+    if (!itemResults || itemResults.length === 0) return null;
+    
+    let bestId = null;
+    let maxSavingsPercent = 0;
+    
+    itemResults.forEach(result => {
+      const current = parseFloat(result.price.replace(/[^0-9.]/g, '')) || 0;
+      const original = result.originalPrice ? (parseFloat(result.originalPrice.replace(/[^0-9.]/g, '')) || current) : current;
+      
+      if (original > current && original > 0) {
+        const savingsPercent = (original - current) / original;
+        if (savingsPercent > maxSavingsPercent) {
+          maxSavingsPercent = savingsPercent;
+          bestId = result.id;
+        }
+      }
+    });
+    
+    return bestId;
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-[#F8F9FA] flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-[#F8F9FA] flex flex-col items-center justify-center p-4">
-        <Toaster position="top-center" richColors />
-        <div className="max-w-md w-full bg-white rounded-3xl shadow-xl p-8 text-center border border-gray-100">
-          <div className="w-20 h-20 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto mb-6">
-            <ShoppingBag className="w-10 h-10 text-blue-600" />
-          </div>
-          <h1 className="text-3xl font-bold text-gray-900 mb-2 tracking-tight">Deal Finder</h1>
-          <p className="text-gray-500 mb-8">Never miss a deal again. Track your favorite items and find the best prices near you.</p>
-          <button 
-            onClick={login}
-            disabled={loggingIn}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-70 text-white font-semibold py-4 px-6 rounded-2xl transition-all flex items-center justify-center gap-3 shadow-lg shadow-blue-200"
-          >
-            {loggingIn ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-            )}
-            {loggingIn ? "Signing in..." : "Sign in with Google"}
-          </button>
-        </div>
       </div>
     );
   }
@@ -333,13 +466,32 @@ export default function App() {
                 className="bg-transparent border-none focus:ring-0 w-32 p-0 text-sm"
               />
             </div>
-            <button 
-              onClick={logout}
-              className="p-2 text-gray-400 hover:text-red-500 transition-colors"
-              title="Logout"
-            >
-              <LogOut className="w-5 h-5" />
-            </button>
+            
+            {user ? (
+              <div className="flex items-center gap-3">
+                <img src={user.photoURL || ''} className="w-8 h-8 rounded-full border-2 border-blue-100" alt={user.displayName || ''} />
+                <button 
+                  onClick={logout}
+                  className="p-2 text-gray-400 hover:text-red-500 transition-colors"
+                  title="Logout"
+                >
+                  <LogOut className="w-5 h-5" />
+                </button>
+              </div>
+            ) : (
+              <button 
+                onClick={login}
+                disabled={loggingIn}
+                className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2 px-4 rounded-xl transition-all flex items-center gap-2 shadow-md shadow-blue-100"
+              >
+                {loggingIn ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <img src="https://www.google.com/favicon.ico" className="w-4 h-4" alt="Google" />
+                )}
+                <span>{loggingIn ? "Signing in..." : "Sign In"}</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -448,18 +600,28 @@ export default function App() {
                       <div className="text-center py-4">
                         <p className="text-sm text-gray-400 italic">No deals saved yet. Click "Find Deals" to search.</p>
                       </div>
-                    ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        {results[item.id].map((result) => (
-                          <a 
-                            key={result.id}
-                            href={result.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="group bg-white p-4 rounded-2xl border border-gray-100 shadow-sm hover:border-blue-200 transition-all flex flex-col justify-between"
-                          >
-                            <div>
-                              <div className="flex items-start justify-between mb-2">
+                    ) : (() => {
+                      const bestId = getBestDealId(results[item.id]);
+                      return (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                          {results[item.id].map((result) => (
+                            <a 
+                              key={result.id}
+                              href={result.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className={cn(
+                                "group bg-white p-4 rounded-2xl border transition-all flex flex-col justify-between relative",
+                                result.id === bestId ? "border-blue-300 shadow-md ring-1 ring-blue-100" : "border-gray-100 shadow-sm hover:border-blue-200"
+                              )}
+                            >
+                              {result.id === bestId && (
+                                <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-[10px] font-bold px-2 py-1 rounded-full shadow-lg z-10 animate-pulse">
+                                  BEST VALUE
+                                </div>
+                              )}
+                              <div>
+                                <div className="flex items-start justify-between mb-2">
                                 <span className="text-xs font-bold uppercase tracking-wider text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
                                   {result.storeName}
                                 </span>
@@ -487,14 +649,15 @@ export default function App() {
                           </a>
                         ))}
                       </div>
-                    )}
-                  </div>
+                    );
+                  })()}
                 </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </main>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </main>
 
       {/* Delete Confirmation Modal */}
       {itemToDelete && (
@@ -511,9 +674,11 @@ export default function App() {
               </button>
               <button 
                 onClick={deleteItem}
-                className="flex-1 px-4 py-3 rounded-xl font-semibold text-white bg-red-500 hover:bg-red-600 transition-all shadow-lg shadow-red-100"
+                disabled={!!deleting}
+                className="flex-1 px-4 py-3 rounded-xl font-semibold text-white bg-red-500 hover:bg-red-600 transition-all shadow-lg shadow-red-100 flex items-center justify-center gap-2"
               >
-                Stop Tracking
+                {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                <span>{deleting ? "Deleting..." : "Stop Tracking"}</span>
               </button>
             </div>
           </div>

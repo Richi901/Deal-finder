@@ -1,0 +1,7 @@
+{
+  "name": "Deal Finder",
+  "description": "Track sales and promotions for your favorite items based on your location.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}

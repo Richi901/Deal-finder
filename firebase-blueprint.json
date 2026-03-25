@@ -1,0 +1,61 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "TrackedItem": {
+      "title": "Tracked Item",
+      "description": "An item being tracked for sales",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "lastSearchAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name"]
+    },
+    "SaleResult": {
+      "title": "Sale Result",
+      "description": "A specific sale found for a tracked item",
+      "type": "object",
+      "properties": {
+        "trackedItemId": { "type": "string" },
+        "userId": { "type": "string" },
+        "storeName": { "type": "string" },
+        "price": { "type": "string" },
+        "originalPrice": { "type": "string" },
+        "discount": { "type": "string" },
+        "url": { "type": "string" },
+        "description": { "type": "string" },
+        "foundAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["trackedItemId", "userId", "storeName", "price"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/trackedItems/{itemId}": {
+      "schema": "TrackedItem",
+      "description": "Items users are tracking"
+    },
+    "/saleResults/{resultId}": {
+      "schema": "SaleResult",
+      "description": "Historical sale results for tracked items"
+    }
+  }
+}
